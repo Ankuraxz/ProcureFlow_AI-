@@ -1,0 +1,183 @@
+# ==============================================================================
+# ProcureFlow AI — Local Multi-Service Docker Compose Topology
+# ------------------------------------------------------------------------------
+# Services:
+#   - a2a-catalog        (Port 8001) : Specialized Catalog & Sourcing A2A SLM
+#   - a2a-policy         (Port 8002) : Specialized Policy & FinOps Risk A2A SLM
+#   - a2a-settlement     (Port 8003) : Specialized AP2 Mandate Settlement A2A SLM
+#   - concierge-gateway  (Port 8000) : FastAPI SSE + A2UI Gateway & ADK Orchestrator
+#   - procureflow-ui     (Port 5173 -> 8080) : React + Vite Declarative A2UI Client
+# ==============================================================================
+
+x-agent-common: &agent-common
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.agent
+  env_file:
+    - path: .env
+      required: false
+  volumes:
+    - procureflow_data:/app/data
+  networks:
+    - procureflow-mesh
+  restart: unless-stopped
+
+services:
+  a2a-catalog:
+    <<: *agent-common
+    container_name: procureflow-a2a-catalog
+    environment:
+      SERVICE_ROLE: "catalog"
+      PORT: "8001"
+      CATALOG_PORT: "8001"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      ORCHESTRATOR_MODEL: "${ORCHESTRATOR_MODEL:-gemini-3.5-flash}"
+      SLM_MODEL: "${SLM_MODEL:-gemini-3.5-flash-lite}"
+      DATA_DIR: "/app/data"
+      SESSION_DB_PATH: "/app/data/procureflow_sessions.db"
+      DOMAIN_DB_PATH: "/app/data/procureflow_domain.db"
+      ENABLE_CLOUD_TRACE: "${ENABLE_CLOUD_TRACE:-false}"
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import sys, urllib.request\nfor p in ('/.well-known/agent.json', '/.well-known/agent-card.json', '/health'):\n    try:\n        if urllib.request.urlopen(f'http://127.0.0.1:8001{p}', timeout=3).status == 200:\n            sys.exit(0)\n    except Exception:\n        pass\nsys.exit(1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  a2a-policy:
+    <<: *agent-common
+    container_name: procureflow-a2a-policy
+    environment:
+      SERVICE_ROLE: "policy"
+      PORT: "8002"
+      POLICY_PORT: "8002"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      ORCHESTRATOR_MODEL: "${ORCHESTRATOR_MODEL:-gemini-3.5-flash}"
+      SLM_MODEL: "${SLM_MODEL:-gemini-3.5-flash-lite}"
+      DATA_DIR: "/app/data"
+      SESSION_DB_PATH: "/app/data/procureflow_sessions.db"
+      DOMAIN_DB_PATH: "/app/data/procureflow_domain.db"
+      ENABLE_CLOUD_TRACE: "${ENABLE_CLOUD_TRACE:-false}"
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import sys, urllib.request\nfor p in ('/.well-known/agent.json', '/.well-known/agent-card.json', '/health'):\n    try:\n        if urllib.request.urlopen(f'http://127.0.0.1:8002{p}', timeout=3).status == 200:\n            sys.exit(0)\n    except Exception:\n        pass\nsys.exit(1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  a2a-settlement:
+    <<: *agent-common
+    container_name: procureflow-a2a-settlement
+    environment:
+      SERVICE_ROLE: "settlement"
+      PORT: "8003"
+      SETTLEMENT_PORT: "8003"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      ORCHESTRATOR_MODEL: "${ORCHESTRATOR_MODEL:-gemini-3.5-flash}"
+      SLM_MODEL: "${SLM_MODEL:-gemini-3.5-flash-lite}"
+      AP2_ED25519_SEED: "${AP2_ED25519_SEED:-}"
+      DATA_DIR: "/app/data"
+      SESSION_DB_PATH: "/app/data/procureflow_sessions.db"
+      DOMAIN_DB_PATH: "/app/data/procureflow_domain.db"
+      ENABLE_CLOUD_TRACE: "${ENABLE_CLOUD_TRACE:-false}"
+    ports:
+      - "8003:8003"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import sys, urllib.request\nfor p in ('/.well-known/agent.json', '/.well-known/agent-card.json', '/health'):\n    try:\n        if urllib.request.urlopen(f'http://127.0.0.1:8003{p}', timeout=3).status == 200:\n            sys.exit(0)\n    except Exception:\n        pass\nsys.exit(1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  concierge-gateway:
+    <<: *agent-common
+    container_name: procureflow-concierge-gateway
+    environment:
+      SERVICE_ROLE: "gateway"
+      PORT: "8000"
+      GATEWAY_PORT: "8000"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      ORCHESTRATOR_MODEL: "${ORCHESTRATOR_MODEL:-gemini-3.5-flash}"
+      SLM_MODEL: "${SLM_MODEL:-gemini-3.5-flash-lite}"
+      JUDGE_MODEL: "${JUDGE_MODEL:-gemini-3.5-flash}"
+      CATALOG_A2A_URL: "http://a2a-catalog:8001"
+      POLICY_A2A_URL: "http://a2a-policy:8002"
+      SETTLEMENT_A2A_URL: "http://a2a-settlement:8003"
+      AP2_ED25519_SEED: "${AP2_ED25519_SEED:-}"
+      DATA_DIR: "/app/data"
+      SESSION_DB_PATH: "/app/data/procureflow_sessions.db"
+      DOMAIN_DB_PATH: "/app/data/procureflow_domain.db"
+      ENABLE_CLOUD_TRACE: "${ENABLE_CLOUD_TRACE:-false}"
+    ports:
+      - "8000:8000"
+    depends_on:
+      a2a-catalog:
+        condition: service_healthy
+      a2a-policy:
+        condition: service_healthy
+      a2a-settlement:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import sys, urllib.request\nfor p in ('/health', '/api/health'):\n    try:\n        if urllib.request.urlopen(f'http://127.0.0.1:8000{p}', timeout=3).status == 200:\n            sys.exit(0)\n    except Exception:\n        pass\nsys.exit(1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  procureflow-ui:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ui
+    container_name: procureflow-ui
+    environment:
+      GATEWAY_URL: "http://concierge-gateway:8000"
+    ports:
+      - "5173:8080"
+    depends_on:
+      concierge-gateway:
+        condition: service_healthy
+    networks:
+      - procureflow-mesh
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  procureflow_data:
+    name: procureflow_sqlite_data
+
+networks:
+  procureflow-mesh:
+    driver: bridge

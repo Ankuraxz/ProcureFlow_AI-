@@ -1,0 +1,16 @@
+# ==============================================================================
+# ProcureFlow AI — Example Terraform Variable Values
+# Copy to terraform.tfvars and populate your GCP project_id before planning.
+# ==============================================================================
+
+project_id           = "your-gcp-project-id"
+region               = "us-central1"
+environment          = "prod"
+artifact_repo_id     = "procureflow-repo"
+image_tag            = "latest"
+orchestrator_model   = "gemini-3.5-flash"
+slm_model            = "gemini-3.5-flash-lite"
+judge_model          = "gemini-3.5-flash"
+min_instance_count   = 0
+max_instance_count   = 10
+allow_public_gateway = true

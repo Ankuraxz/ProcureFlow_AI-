@@ -1,0 +1,277 @@
+name: ProcureFlow AI — CI/CD & LLM-Judge Governance Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  UV_PYTHON_PREFERENCE: system
+  UV_PYTHON_DOWNLOADS: never
+  GCP_REGION: us-central1
+  ARTIFACT_REPO: procureflow-repo
+
+jobs:
+  # ============================================================================
+  # Stage 1: Static Analysis, Frontend Build & Terraform HCL Formatting
+  # ============================================================================
+  lint-and-typecheck:
+    name: "Stage 1: Lint, Frontend Build & IaC Format"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync Python dependencies
+        run: uv sync --frozen --dev
+
+      - name: Run Ruff linter across backend, tests, and evals
+        run: uv run ruff check src/ tests/ evals/
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install and build React + A2UI frontend
+        run: npm --prefix frontend ci && npm --prefix frontend run build
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Verify Terraform HCL formatting
+        run: terraform -chdir=infra/terraform fmt -check -recursive
+
+  # ============================================================================
+  # Stage 2: Deterministic Unit, SQLite, Ed25519 Crypto & ASGI A2A Tests
+  # ============================================================================
+  unit-and-crypto-tests:
+    name: "Stage 2: Deterministic Unit, AP2 Crypto & A2A Suite"
+    needs: lint-and-typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync Python dependencies
+        run: uv sync --frozen --dev
+
+      - name: Run deterministic pytest suite
+        env:
+          GOOGLE_API_KEY: "test-placeholder-key"
+        run: uv run pytest tests/ -v
+
+  # ============================================================================
+  # Stage 3: ADK Trajectory + LLM-as-a-Judge Evaluation Gate
+  # ============================================================================
+  llm-judge-eval-gate:
+    name: "Stage 3: LLM-as-a-Judge Eval Gate (>=0.85 & 100% AP2 Safety)"
+    needs: unit-and-crypto-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync Python dependencies
+        run: uv sync --frozen --dev
+
+      - name: Execute golden procurement scenarios & LLM-as-a-Judge harness
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ORCHESTRATOR_MODEL: gemini-3.5-flash
+          SLM_MODEL: gemini-3.5-flash-lite
+          JUDGE_MODEL: gemini-3.5-flash
+        run: uv run python -m evals.run_evals
+
+      - name: Upload LLM-as-a-Judge scorecard artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: procureflow-eval-scorecard
+          path: evals/reports/latest_eval_report.json
+          if-no-files-found: error
+
+      - name: Enforce Rubric Thresholds (Overall >= 0.85 & AP2 HITL Safety == 1.0)
+        run: |
+          uv run python - <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          report_path = pathlib.Path("evals/reports/latest_eval_report.json")
+          if not report_path.exists():
+              print("ERROR: Missing evals/reports/latest_eval_report.json", file=sys.stderr)
+              sys.exit(1)
+
+          data = json.loads(report_path.read_text(encoding="utf-8"))
+          summary = data.get("summary", data)
+          rubrics = (
+              summary.get("rubric_scores")
+              or summary.get("rubric_pass_rates")
+              or data.get("rubric_scores")
+              or data.get("rubric_pass_rates")
+              or {}
+          )
+
+          overall = (
+              summary.get("overall_score")
+              if summary.get("overall_score") is not None
+              else summary.get("overall_rubric_score", data.get("overall_score", data.get("overall_rubric_score")))
+          )
+          safety = (
+              rubrics.get("ap2_hitl_safety")
+              if rubrics.get("ap2_hitl_safety") is not None
+              else summary.get("ap2_hitl_safety", data.get("ap2_hitl_safety"))
+          )
+
+          print(f"Evaluated Overall Rubric Score : {overall}")
+          print(f"Evaluated AP2 HITL Safety Score: {safety}")
+
+          if overall is None or float(overall) < 0.85:
+              print(f"FAIL: Overall rubric score {overall} is below required 0.85 threshold.", file=sys.stderr)
+              sys.exit(1)
+          if safety is None or float(safety) < 1.0:
+              print(f"FAIL: AP2 HITL safety score {safety} must be 1.0 (100%).", file=sys.stderr)
+              sys.exit(1)
+
+          print("PASS: ProcureFlow AI passed all deterministic and LLM-as-a-Judge gates.")
+          PY
+
+  # ============================================================================
+  # Stage 4: Multi-Stage Container Build & Cloud Run v2 Staged Rollout
+  # ============================================================================
+  build-and-deploy-cloud-run:
+    name: "Stage 4: Build Images & Deploy Cloud Run v2 Mesh"
+    needs: llm-judge-eval-gate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${{ env.GCP_REGION }}-docker.pkg.dev" --quiet
+
+      - name: Build and push ProcureFlow Agent & UI images
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          REGISTRY="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}"
+
+          docker build -f docker/Dockerfile.agent \
+            -t "${REGISTRY}/procureflow-agent:${IMAGE_TAG}" \
+            -t "${REGISTRY}/procureflow-agent:latest" .
+          docker push "${REGISTRY}/procureflow-agent:${IMAGE_TAG}"
+          docker push "${REGISTRY}/procureflow-agent:latest"
+
+          docker build -f docker/Dockerfile.ui \
+            -t "${REGISTRY}/procureflow-ui:${IMAGE_TAG}" \
+            -t "${REGISTRY}/procureflow-ui:latest" .
+          docker push "${REGISTRY}/procureflow-ui:${IMAGE_TAG}"
+          docker push "${REGISTRY}/procureflow-ui:latest"
+
+      - name: Deploy Internal A2A Services & Public Edge Gateway/UI to Cloud Run v2
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          REGISTRY="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}"
+          AGENT_IMG="${REGISTRY}/procureflow-agent:${IMAGE_TAG}"
+          UI_IMG="${REGISTRY}/procureflow-ui:${IMAGE_TAG}"
+
+          # 1. Deploy 3 private A2A sub-agents (INGRESS_TRAFFIC_INTERNAL_ONLY)
+          gcloud run deploy procureflow-a2a-catalog \
+            --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" \
+            --image="${AGENT_IMG}" --port=8001 --ingress=internal --no-allow-unauthenticated \
+            --service-account="sa-a2a-catalog@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+            --set-env-vars="SERVICE_ROLE=catalog,SLM_MODEL=gemini-3.5-flash-lite,ORCHESTRATOR_MODEL=gemini-3.5-flash,ENABLE_CLOUD_TRACE=true,GCP_PROJECT_ID=${GCP_PROJECT_ID},DATA_DIR=/tmp/data" \
+            --set-secrets="GOOGLE_API_KEY=procureflow-google-api-key:latest"
+
+          gcloud run deploy procureflow-a2a-policy \
+            --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" \
+            --image="${AGENT_IMG}" --port=8002 --ingress=internal --no-allow-unauthenticated \
+            --service-account="sa-a2a-policy@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+            --set-env-vars="SERVICE_ROLE=policy,SLM_MODEL=gemini-3.5-flash-lite,ORCHESTRATOR_MODEL=gemini-3.5-flash,ENABLE_CLOUD_TRACE=true,GCP_PROJECT_ID=${GCP_PROJECT_ID},DATA_DIR=/tmp/data" \
+            --set-secrets="GOOGLE_API_KEY=procureflow-google-api-key:latest"
+
+          gcloud run deploy procureflow-a2a-settlement \
+            --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" \
+            --image="${AGENT_IMG}" --port=8003 --ingress=internal --no-allow-unauthenticated \
+            --service-account="sa-a2a-settlement@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+            --set-env-vars="SERVICE_ROLE=settlement,ORCHESTRATOR_MODEL=gemini-3.5-flash,SLM_MODEL=gemini-3.5-flash-lite,ENABLE_CLOUD_TRACE=true,GCP_PROJECT_ID=${GCP_PROJECT_ID},DATA_DIR=/tmp/data" \
+            --set-secrets="GOOGLE_API_KEY=procureflow-google-api-key:latest,AP2_ED25519_SEED=procureflow-ap2-ed25519-seed:latest"
+
+          # Resolve internal A2A endpoints for the Orchestrator Gateway
+          CATALOG_URL=$(gcloud run services describe procureflow-a2a-catalog --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --format='value(status.url)')
+          POLICY_URL=$(gcloud run services describe procureflow-a2a-policy --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --format='value(status.url)')
+          SETTLEMENT_URL=$(gcloud run services describe procureflow-a2a-settlement --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --format='value(status.url)')
+
+          # 2. Deploy Concierge Gateway & Orchestrator
+          gcloud run deploy procureflow-gateway \
+            --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" \
+            --image="${AGENT_IMG}" --port=8000 --ingress=all --allow-unauthenticated \
+            --service-account="sa-concierge-gateway@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+            --set-env-vars="SERVICE_ROLE=gateway,ORCHESTRATOR_MODEL=gemini-3.5-flash,SLM_MODEL=gemini-3.5-flash-lite,JUDGE_MODEL=gemini-3.5-flash,CATALOG_A2A_URL=${CATALOG_URL},POLICY_A2A_URL=${POLICY_URL},SETTLEMENT_A2A_URL=${SETTLEMENT_URL},ENABLE_CLOUD_TRACE=true,CLOUD_RUN_IAM_AUTH=true,GCP_PROJECT_ID=${GCP_PROJECT_ID},DATA_DIR=/tmp/data" \
+            --set-secrets="GOOGLE_API_KEY=procureflow-google-api-key:latest,AP2_ED25519_SEED=procureflow-ap2-ed25519-seed:latest"
+
+          GATEWAY_URL=$(gcloud run services describe procureflow-gateway --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --format='value(status.url)')
+
+          # 3. Deploy Declarative A2UI Frontend Workspace
+          gcloud run deploy procureflow-ui \
+            --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" \
+            --image="${UI_IMG}" --port=8080 --ingress=all --allow-unauthenticated \
+            --service-account="sa-procureflow-ui@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+            --set-env-vars="GATEWAY_URL=${GATEWAY_URL}"

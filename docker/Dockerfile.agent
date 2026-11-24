@@ -1,0 +1,74 @@
+# syntax=docker/dockerfile:1.7
+# ==============================================================================
+# ProcureFlow AI — Multi-Stage Agent & Gateway Container
+# Supports SERVICE_ROLE = gateway | catalog | policy | settlement
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Stage 1: Dependency & Wheel Builder (Python 3.14 + uv)
+# ------------------------------------------------------------------------------
+FROM python:3.14-slim AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:0.6.6 /uv /uvx /bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON_PREFERENCE=only-system \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install third-party dependencies first for optimal Docker layer caching
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Copy procedural SkillToolset playbooks and application source, then install package
+COPY skills ./skills
+COPY src ./src
+RUN uv sync --frozen --no-dev
+
+# ------------------------------------------------------------------------------
+# Stage 2: Distroless-Style Minimal Slim Runtime (Non-Root)
+# ------------------------------------------------------------------------------
+FROM python:3.14-slim AS runtime
+
+LABEL org.opencontainers.image.title="procureflow-agent" \
+      org.opencontainers.image.description="ProcureFlow AI — ADK Orchestrator & A2A SLM Runtime" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+# Create dedicated unprivileged runtime user and persistent SQLite directory
+RUN groupadd --gid 10001 procureflow && \
+    useradd --uid 10001 --gid procureflow --shell /usr/sbin/nologin --create-home procureflow && \
+    mkdir -p /app/data && \
+    chown -R procureflow:procureflow /app
+
+WORKDIR /app
+
+COPY --from=builder --chown=procureflow:procureflow /app/.venv /app/.venv
+COPY --from=builder --chown=procureflow:procureflow /app/skills /app/skills
+COPY --from=builder --chown=procureflow:procureflow /app/src /app/src
+COPY --from=builder --chown=procureflow:procureflow /app/pyproject.toml /app/pyproject.toml
+COPY --from=builder --chown=procureflow:procureflow /app/README.md /app/README.md
+
+ENV PATH="/app/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    SERVICE_ROLE="gateway" \
+    PORT="8000" \
+    DATA_DIR="/app/data" \
+    SKILLS_DIR="/app/skills" \
+    SESSION_DB_PATH="/app/data/procureflow_sessions.db" \
+    DOMAIN_DB_PATH="/app/data/procureflow_domain.db"
+
+USER procureflow
+
+EXPOSE 8000
+
+# Role-aware HTTP healthcheck using Python stdlib (zero curl/wget overhead).
+# Probes /health (/api/health fallback) for gateway or /.well-known/agent*.json (/health fallback) for A2A sub-agents.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=5 \
+    CMD ["/app/.venv/bin/python", "-c", "import os, sys, urllib.request\nport = os.environ.get('PORT', '8000')\nrole = os.environ.get('SERVICE_ROLE', 'gateway')\npaths = ('/health', '/api/health') if role == 'gateway' else ('/.well-known/agent.json', '/.well-known/agent-card.json', '/health')\nfor p in paths:\n    try:\n        if urllib.request.urlopen(f'http://127.0.0.1:{port}{p}', timeout=3).status == 200:\n            sys.exit(0)\n    except Exception:\n        pass\nsys.exit(1)"]
+
+CMD ["/bin/sh", "-c", "exec .venv/bin/procureflow-ai serve-service --role ${SERVICE_ROLE} --host 0.0.0.0 --port ${PORT}"]
